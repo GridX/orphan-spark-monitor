@@ -1,0 +1,5 @@
+:rotating_light: *Orphaned Spark EC2 instances* — their Azkaban execution (the instance's `JobID` tag) is KILLED/FAILED/CANCELLED >24.0h ago, but the instances are still running. Planning to clean up — *please reply if any are still needed.*
+
+*On-demand — 0 instances across 0 names (will terminate):*
+
+*Spot — 0 instances across 0 names (cancel fleet/spot request; they respawn if only terminated):*
