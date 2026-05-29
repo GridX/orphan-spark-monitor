@@ -4,21 +4,21 @@ on:
   workflow_dispatch:
     inputs:
       environment:
-        description: 'Target environment'
+        description: "Target environment"
         required: true
         type: choice
         options:
           - prod
       action:
-        description: 'Terraform action to perform'
+        description: "Terraform action to perform"
         required: true
         type: choice
-        default: 'plan'
+        default: "plan"
         options:
           - plan
           - apply
       auto_approve:
-        description: 'Auto approve apply (use with caution)'
+        description: "Auto approve apply (use with caution)"
         required: false
         type: boolean
         default: false
@@ -26,28 +26,28 @@ on:
   workflow_call:
     inputs:
       environment:
-        description: 'Target environment'
+        description: "Target environment"
         required: true
         type: string
       action:
-        description: 'Terraform action to perform'
+        description: "Terraform action to perform"
         required: true
         type: string
-        default: 'plan'
+        default: "plan"
       auto_approve:
-        description: 'Auto approve apply (use with caution)'
+        description: "Auto approve apply (use with caution)"
         required: false
         type: boolean
         default: false
     outputs:
       function_name:
-        description: 'Deployed Lambda function name'
+        description: "Deployed Lambda function name"
         value: ${{ jobs.terraform.outputs.function_name }}
       function_arn:
-        description: 'Deployed Lambda function ARN'
+        description: "Deployed Lambda function ARN"
         value: ${{ jobs.terraform.outputs.function_arn }}
       schedule_rule_name:
-        description: 'EventBridge schedule rule name'
+        description: "EventBridge schedule rule name"
         value: ${{ jobs.terraform.outputs.schedule_rule_name }}
 
 concurrency:
@@ -59,7 +59,7 @@ run-name: ${{ format('Terraform-{0}-{1} (auto-approve - {2})', inputs.environmen
 env:
   AWS_REGION: us-west-2
   TERRAFORM_VERSION: 1.5.0
-  # Both UAT and Prod live in the same AWS account.
+  # Both UAT and Prod live in the same AWS account. Only deploying in prod
   AWS_ROLE_ARN: arn:aws:iam::743512984079:role/github-oidc-provider-role
 
 jobs:
@@ -85,7 +85,7 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: "3.12"
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
