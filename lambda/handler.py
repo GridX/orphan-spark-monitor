@@ -35,19 +35,21 @@ LOG.setLevel(logging.INFO)
 def get_slack_webhook(session, region, secret_id):
     """Return the Slack incoming-webhook URL from Secrets Manager.
 
-    The secret value may be either the raw URL or a JSON object. For JSON we
-    accept either `url` or `webhook_url` as the key — `slack/webhook/prod`
-    uses `url`, but other secrets in the org may use `webhook_url`.
+    The secret value may be either the raw URL or a JSON object. Across
+    GridX, different Slack-webhook secrets use different JSON keys, so we
+    accept any of `webhook`, `url`, or `webhook_url`:
+      - slack/long_running_job  -> {"webhook": "..."}
+      - slack/webhook/prod      -> {"url": "..."}
     """
     sm = session.client("secretsmanager", region_name=region)
     raw = sm.get_secret_value(SecretId=secret_id)["SecretString"]
     if raw.lstrip().startswith("{"):
         d = json.loads(raw)
-        url = d.get("url") or d.get("webhook_url")
+        url = d.get("webhook") or d.get("url") or d.get("webhook_url")
         if not url:
             raise KeyError(
-                f"secret {secret_id!r}: expected key 'url' or 'webhook_url', "
-                f"got {sorted(d)}")
+                f"secret {secret_id!r}: expected key 'webhook', 'url', or "
+                f"'webhook_url', got {sorted(d)}")
         return url
     return raw.strip()
 

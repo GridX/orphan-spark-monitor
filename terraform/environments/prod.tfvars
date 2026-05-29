@@ -17,4 +17,4 @@ subnet_ids = [
 # azkaban SG — egress all, lets the Lambda reach Azkaban + live.internal.
 security_group_ids = ["sg-062b337a"]
 
-slack_webhook_secret_id = "slack/webhook/prod"
+slack_webhook_secret_id = "slack/long_running_job"

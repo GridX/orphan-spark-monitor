@@ -2,7 +2,7 @@
 
 Daily Lambda that runs the orphan-spark finder and posts the grouped Slack
 summary (the same format `generate_outputs.py` produces) to the channel wired
-to `slack/webhook/prod`.
+to `slack/long_running_job`.
 
 ## Deploy
 

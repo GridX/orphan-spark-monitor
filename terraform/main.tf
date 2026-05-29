@@ -6,7 +6,7 @@ terraform {
   }
 }
 
-# The Slack webhook lives in Secrets Manager (slack/webhook/prod by default).
+# The Slack webhook lives in Secrets Manager (slack/long_running_job by default).
 # Look it up by name so the IAM policy can be scoped to its exact ARN.
 data "aws_secretsmanager_secret" "slack_webhook" {
   name = var.slack_webhook_secret_id

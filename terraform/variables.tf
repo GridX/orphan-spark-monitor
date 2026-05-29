@@ -42,7 +42,7 @@ variable "security_group_ids" {
 variable "slack_webhook_secret_id" {
   description = "Secrets Manager id holding the Slack incoming webhook URL."
   type        = string
-  default     = "slack/webhook/prod"
+  default     = "slack/long_running_job"
 }
 
 variable "azkaban_secret_ids" {
