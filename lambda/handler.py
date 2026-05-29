@@ -33,10 +33,22 @@ LOG.setLevel(logging.INFO)
 
 
 def get_slack_webhook(session, region, secret_id):
+    """Return the Slack incoming-webhook URL from Secrets Manager.
+
+    The secret value may be either the raw URL or a JSON object. For JSON we
+    accept either `url` or `webhook_url` as the key — `slack/webhook/prod`
+    uses `url`, but other secrets in the org may use `webhook_url`.
+    """
     sm = session.client("secretsmanager", region_name=region)
     raw = sm.get_secret_value(SecretId=secret_id)["SecretString"]
     if raw.lstrip().startswith("{"):
-        return json.loads(raw)["webhook_url"]
+        d = json.loads(raw)
+        url = d.get("url") or d.get("webhook_url")
+        if not url:
+            raise KeyError(
+                f"secret {secret_id!r}: expected key 'url' or 'webhook_url', "
+                f"got {sorted(d)}")
+        return url
     return raw.strip()
 
 
