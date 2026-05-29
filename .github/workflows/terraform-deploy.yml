@@ -1,0 +1,276 @@
+name: Deploy Terraform Infrastructure
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        type: choice
+        options:
+          - prod
+      action:
+        description: 'Terraform action to perform'
+        required: true
+        type: choice
+        default: 'plan'
+        options:
+          - plan
+          - apply
+      auto_approve:
+        description: 'Auto approve apply (use with caution)'
+        required: false
+        type: boolean
+        default: false
+
+  workflow_call:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        type: string
+      action:
+        description: 'Terraform action to perform'
+        required: true
+        type: string
+        default: 'plan'
+      auto_approve:
+        description: 'Auto approve apply (use with caution)'
+        required: false
+        type: boolean
+        default: false
+    outputs:
+      function_name:
+        description: 'Deployed Lambda function name'
+        value: ${{ jobs.terraform.outputs.function_name }}
+      function_arn:
+        description: 'Deployed Lambda function ARN'
+        value: ${{ jobs.terraform.outputs.function_arn }}
+      schedule_rule_name:
+        description: 'EventBridge schedule rule name'
+        value: ${{ jobs.terraform.outputs.schedule_rule_name }}
+
+concurrency:
+  group: terraform-${{ inputs.environment }}-${{ github.ref }}
+  cancel-in-progress: false
+
+run-name: ${{ format('Terraform-{0}-{1} (auto-approve - {2})', inputs.environment, inputs.action, inputs.auto_approve) }}
+
+env:
+  AWS_REGION: us-west-2
+  TERRAFORM_VERSION: 1.5.0
+  # Both UAT and Prod live in the same AWS account.
+  AWS_ROLE_ARN: arn:aws:iam::743512984079:role/github-oidc-provider-role
+
+jobs:
+  terraform:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+      pull-requests: write
+
+    environment:
+      name: ${{ inputs.environment }}
+
+    outputs:
+      function_name: ${{ steps.outputs.outputs.function_name }}
+      function_arn: ${{ steps.outputs.outputs.function_arn }}
+      schedule_rule_name: ${{ steps.outputs.outputs.schedule_rule_name }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Build Lambda package
+        run: ./lambda/build.sh
+
+      - name: Terraform Init
+        working-directory: terraform
+        run: |
+          echo "🔧 Initializing Terraform with remote state..."
+          terraform init \
+            -backend-config="environments/${{ inputs.environment }}.backend.hcl" \
+            -reconfigure
+
+      - name: Terraform Format Check
+        working-directory: terraform
+        run: |
+          echo "📝 Checking Terraform formatting..."
+          terraform fmt -check=true -diff=true
+
+      - name: Terraform Validate
+        working-directory: terraform
+        run: |
+          echo "✅ Validating Terraform configuration..."
+          terraform validate
+
+      - name: Terraform Plan
+        id: plan
+        working-directory: terraform
+        run: |
+          echo "📋 Creating Terraform plan for ${{ inputs.environment }}..."
+          terraform plan \
+            -var-file="environments/${{ inputs.environment }}.tfvars" \
+            -out="${{ inputs.environment }}.tfplan" \
+            -detailed-exitcode
+        continue-on-error: true
+
+      - name: Update Pull Request
+        uses: actions/github-script@v7
+        if: github.event_name == 'pull_request'
+        env:
+          PLAN: "terraform\n${{ steps.plan.outputs.stdout }}"
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const output = `#### Terraform Plan 📋 \`${{ inputs.environment }}\`
+
+            <details><summary>Show Plan</summary>
+
+            \`\`\`\n
+            ${process.env.PLAN}
+            \`\`\`
+
+            </details>
+
+            *Action: \`${{ inputs.action }}\`, Environment: \`${{ inputs.environment }}\`, Workflow: \`${{ github.workflow }}\`, Event: \`${{ github.event_name }}\`*`;
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: output
+            })
+
+      - name: Terraform Plan Status
+        if: steps.plan.outcome == 'failure'
+        run: |
+          echo "❌ Terraform plan failed"
+          exit 1
+
+      - name: Terraform Apply
+        if: inputs.action == 'apply' && (inputs.auto_approve || github.event_name == 'workflow_dispatch')
+        working-directory: terraform
+        run: |
+          echo "🚀 Applying Terraform plan for ${{ inputs.environment }}..."
+          if [ "${{ inputs.auto_approve }}" = "true" ]; then
+            echo "⚠️  Auto-approve enabled - applying without confirmation"
+            terraform apply -auto-approve "${{ inputs.environment }}.tfplan"
+          else
+            terraform apply "${{ inputs.environment }}.tfplan"
+          fi
+
+      - name: Get Terraform Outputs
+        id: outputs
+        if: inputs.action == 'apply' || inputs.action == 'plan'
+        working-directory: terraform
+        run: |
+          echo "📤 Setting deployment outputs..."
+
+          # Outputs only exist after apply; on plan-only runs these stay empty.
+          FUNCTION_NAME="$(terraform output -raw function_name 2>/dev/null || echo '')"
+          FUNCTION_ARN="$(terraform output -raw function_arn 2>/dev/null || echo '')"
+          SCHEDULE_RULE_NAME="$(terraform output -raw schedule_rule_name 2>/dev/null || echo '')"
+
+          echo "function_name=$FUNCTION_NAME" >> "$GITHUB_OUTPUT"
+          echo "function_arn=$FUNCTION_ARN" >> "$GITHUB_OUTPUT"
+          echo "schedule_rule_name=$SCHEDULE_RULE_NAME" >> "$GITHUB_OUTPUT"
+
+          echo "✅ Outputs set successfully"
+
+      - name: Debug Lambda (on failure)
+        if: failure() && inputs.action == 'apply'
+        run: |
+          FN="${{ steps.outputs.outputs.function_name }}"
+          if [ -z "$FN" ]; then
+            echo "No function_name output yet — skipping Lambda diagnostics."
+            exit 0
+          fi
+
+          echo "=== Lambda configuration ==="
+          aws lambda get-function-configuration --function-name "$FN" || true
+
+          echo "=== Recent CloudWatch log streams ==="
+          aws logs describe-log-streams \
+            --log-group-name "/aws/lambda/$FN" \
+            --order-by LastEventTime --descending --max-items 3 || true
+
+      - name: Deployment Summary
+        if: always()
+        run: |
+          {
+            echo "## 🚀 orphan-spark Terraform Deployment Summary"
+            echo ""
+            echo "| Component | Status | Details |"
+            echo "|-----------|--------|---------|"
+            echo "| **Environment** | ✅ | \`${{ inputs.environment }}\` |"
+            echo "| **Action** | ${{ (inputs.action == 'apply' && '🚀') || '📋' }} | \`${{ inputs.action }}\` |"
+            echo "| **AWS Account** | ✅ | \`743512984079\` |"
+            echo "| **Region** | ✅ | \`${{ env.AWS_REGION }}\` |"
+            echo "| **Function** | ✅ | \`${{ steps.outputs.outputs.function_name || 'pending' }}\` |"
+            echo "| **Schedule Rule** | ✅ | \`${{ steps.outputs.outputs.schedule_rule_name || 'pending' }}\` |"
+            echo "| **Git SHA** | ✅ | \`${{ github.sha }}\` |"
+            echo ""
+            if [ "${{ inputs.action }}" = "plan" ]; then
+              echo "### 📋 Plan Results"
+              echo "Terraform plan completed. Review the plan above and re-run with action \`apply\` to deploy changes."
+            elif [ "${{ inputs.action }}" = "apply" ]; then
+              echo "### 🚀 Deployment Complete"
+              echo "Lambda function and EventBridge schedule deployed. The Lambda scans EC2 for orphaned spark instances and posts results to Slack."
+              echo ""
+              echo "**Next Steps:**"
+              echo "1. Manually invoke once to smoke-test: \`aws lambda invoke --function-name ${{ steps.outputs.outputs.function_name || 'orphan-spark-scan' }} /tmp/out.json && cat /tmp/out.json\`"
+              echo "2. Verify the Slack channel received the scan message."
+              echo "3. Confirm the EventBridge rule is enabled and scheduled as expected."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Console Output
+        if: always()
+        run: |
+          echo ""
+          echo "=== ORPHAN-SPARK TERRAFORM DEPLOYMENT SUMMARY ==="
+          echo "🎯 Environment: ${{ inputs.environment }}"
+          echo "⚡ Action: ${{ inputs.action }}"
+          echo "🏗️  AWS Account: 743512984079"
+          echo "🌍 Region: ${{ env.AWS_REGION }}"
+          echo "λ  Function: ${{ steps.outputs.outputs.function_name || 'pending' }}"
+          echo "⏰ Schedule: ${{ steps.outputs.outputs.schedule_rule_name || 'pending' }}"
+          echo "📂 Git SHA: ${{ github.sha }}"
+          echo "✅ Terraform ${{ inputs.action }} completed successfully!"
+
+      - name: Deployment Verification Commands
+        if: inputs.action == 'apply'
+        run: |
+          {
+            echo ""
+            echo "### 🔍 Verification Commands"
+            echo ""
+            echo "\`\`\`bash"
+            echo "# Smoke-test the function"
+            echo "aws lambda invoke --function-name ${{ steps.outputs.outputs.function_name }} /tmp/out.json && cat /tmp/out.json"
+            echo ""
+            echo "# Tail recent logs"
+            echo "aws logs tail /aws/lambda/${{ steps.outputs.outputs.function_name }} --since 1h --follow"
+            echo ""
+            echo "# Inspect the EventBridge schedule"
+            echo "aws events describe-rule --name ${{ steps.outputs.outputs.schedule_rule_name }}"
+            echo "\`\`\`"
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -242,34 +242,30 @@ def fetch_live_pricing():
     return out
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--profile", default="uat", help="AWS profile (default: uat)")
-    parser.add_argument("--region", default="us-west-2", help="AWS region (default: us-west-2)")
-    parser.add_argument("--hours", type=float, default=1.0,
-                        help="Stopped-longer-than threshold in hours (default: 1)")
-    parser.add_argument("--verify-tls", action="store_true",
-                        help="Verify Azkaban TLS certs (off by default: prod/stage "
-                             "use self-signed certs)")
-    parser.add_argument("--json", dest="as_json", action="store_true",
-                        help="Emit JSON instead of a table")
-    args = parser.parse_args()
+class MissingTagError(RuntimeError):
+    """An instance is missing a tag the finder requires to audit it."""
 
-    verify = args.verify_tls
-    if not verify:
-        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-    threshold_ms = args.hours * 3600 * 1000
+def find_orphans(session, region, hours, verify, log=None):
+    """Return the list of orphaned spark-slave instances.
+
+    Pure function over (session, region, hours, verify): does not parse args,
+    print summary tables, or touch the filesystem. Callers (CLI main(), Lambda
+    handler) wrap this with their own output / error reporting.
+
+    Raises MissingTagError if an instance is missing Environment or JobID.
+    Raises AzkabanError if Azkaban / Secrets Manager fails for any audited
+    instance (per-instance exec-not-found is logged and skipped, not raised).
+    """
+    log = log or (lambda *a, **k: None)
+    threshold_ms = hours * 3600 * 1000
     now_ms = time.time() * 1000
 
-    session = boto3.Session(profile_name=args.profile)
-    instances = list_spark_instances(session, args.region)
-    print(f"Found {len(instances)} running spark* instances with a JobID tag.",
-          file=sys.stderr)
+    instances = list_spark_instances(session, region)
+    log(f"Found {len(instances)} running spark* instances with a JobID tag.")
 
     pricing = fetch_live_pricing()
-    print(f"Loaded pricing for {len(pricing)} instances from live view.",
-          file=sys.stderr)
+    log(f"Loaded pricing for {len(pricing)} instances from live view.")
 
     # Lazy per-env creds (Secrets Manager) + login + per-(env,execid) cache.
     azkaban_cfg = {}        # env -> (base_url, user, password)
@@ -280,7 +276,7 @@ def main():
         key = (env, execid)
         if key in exec_flow_cache:
             return exec_flow_cache[key]
-        base_url, user, password = get_azkaban_config(session, args.region, env, azkaban_cfg)
+        base_url, user, password = get_azkaban_config(session, region, env, azkaban_cfg)
         if env not in sessions:
             sessions[env] = azkaban_login(base_url, user, password, verify)
         flow = fetch_exec_flow(base_url, sessions[env], execid, verify)
@@ -296,13 +292,13 @@ def main():
         iid = inst["InstanceId"]
 
         if not env:
-            sys.exit(
-                f"ERROR: instance {iid} ({name}) has no Environment tag. "
+            raise MissingTagError(
+                f"instance {iid} ({name}) has no Environment tag. "
                 f"Cannot determine which Azkaban host to query. "
                 f"Fix the tag or add the env to AZKABAN_SECRETS, then rerun.")
         if not execid:
-            sys.exit(
-                f"ERROR: instance {iid} ({name}) has no JobID tag. "
+            raise MissingTagError(
+                f"instance {iid} ({name}) has no JobID tag. "
                 f"Cannot audit. (Note: the EC2 filter requires a JobID tag, "
                 f"so reaching this branch means tags changed mid-run — rerun.)")
 
@@ -314,15 +310,14 @@ def main():
         except AzkabanExecNotFound as e:
             # Per-instance: exec was purged or never existed in this Azkaban.
             # We can't confirm orphan, so skip without aborting the whole run.
-            print(f"  ! skipping instance {iid} ({name}, env={env}): {e}",
-                  file=sys.stderr)
+            log(f"  ! skipping instance {iid} ({name}, env={env}): {e}")
             continue
         except AzkabanError as e:
-            sys.exit(
-                f"ERROR: cannot audit instance {iid} ({name}, env={env}, "
+            raise AzkabanError(
+                f"cannot audit instance {iid} ({name}, env={env}, "
                 f"jobid={execid}) — {e}\n"
                 f"Aborting without writing output to avoid a partial/unsafe list. "
-                f"Fix the issue (VPN? creds? Azkaban down?) and rerun.")
+                f"Fix the issue (VPN? creds? Azkaban down?) and rerun.") from e
         status = ef.get("status")
         if status not in STOPPED_STATUSES:
             continue
@@ -332,9 +327,8 @@ def main():
         if end_ms <= 0:
             # Terminal status with no timestamp is suspicious; surface it
             # rather than silently dropping the instance from consideration.
-            print(f"  ! instance {iid} ({name}) exec={execid} status={status} "
-                  f"has no endTime/updateTime — skipping (please investigate)",
-                  file=sys.stderr)
+            log(f"  ! instance {iid} ({name}) exec={execid} status={status} "
+                f"has no endTime/updateTime — skipping (please investigate)")
             continue
         if (now_ms - end_ms) < threshold_ms:
             continue  # stopped too recently
@@ -370,7 +364,7 @@ def main():
     # Live view doesn't price spot instances; fall back to the spot request.
     need = {o["SpotRequestId"] for o in orphans
             if not o["PricePerHour"] and o.get("SpotRequestId")}
-    spot_prices = fetch_spot_prices(session, args.region, need)
+    spot_prices = fetch_spot_prices(session, region, need)
     for o in orphans:
         if not o["PricePerHour"] and o.get("SpotRequestId"):
             p = spot_prices.get(o["SpotRequestId"])
@@ -378,6 +372,36 @@ def main():
                 o["PricePerHour"] = p
                 o["MonthlyCost"] = round(p * HOURS_PER_MONTH, 2)
                 o["PriceSource"] = "spot request"
+
+    return orphans
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--profile", default="uat", help="AWS profile (default: uat)")
+    parser.add_argument("--region", default="us-west-2", help="AWS region (default: us-west-2)")
+    parser.add_argument("--hours", type=float, default=1.0,
+                        help="Stopped-longer-than threshold in hours (default: 1)")
+    parser.add_argument("--verify-tls", action="store_true",
+                        help="Verify Azkaban TLS certs (off by default: prod/stage "
+                             "use self-signed certs)")
+    parser.add_argument("--json", dest="as_json", action="store_true",
+                        help="Emit JSON instead of a table")
+    args = parser.parse_args()
+
+    verify = args.verify_tls
+    if not verify:
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+    session = boto3.Session(profile_name=args.profile)
+
+    def log(msg):
+        print(msg, file=sys.stderr)
+
+    try:
+        orphans = find_orphans(session, args.region, args.hours, verify, log=log)
+    except (MissingTagError, AzkabanError) as e:
+        sys.exit(f"ERROR: {e}")
 
     if args.as_json:
         print(json.dumps(orphans, indent=2))
