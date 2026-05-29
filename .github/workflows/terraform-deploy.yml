@@ -166,6 +166,7 @@ jobs:
           exit 1
 
       - name: Terraform Apply
+        id: apply
         if: inputs.action == 'apply' && (inputs.auto_approve || github.event_name == 'workflow_dispatch')
         working-directory: terraform
         run: |
@@ -179,20 +180,19 @@ jobs:
 
       - name: Get Terraform Outputs
         id: outputs
-        if: inputs.action == 'apply' || inputs.action == 'plan'
+        # Only after a real apply: on plan-only runs `terraform output` writes a
+        # "No outputs found" warning that contains a newline + box-drawing char,
+        # which corrupts $GITHUB_OUTPUT and fails the step. Downstream steps
+        # fall back to 'pending' via `|| 'pending'` when this step is skipped.
+        if: steps.apply.outcome == 'success'
         working-directory: terraform
         run: |
           echo "📤 Setting deployment outputs..."
-
-          # Outputs only exist after apply; on plan-only runs these stay empty.
-          FUNCTION_NAME="$(terraform output -raw function_name 2>/dev/null || echo '')"
-          FUNCTION_ARN="$(terraform output -raw function_arn 2>/dev/null || echo '')"
-          SCHEDULE_RULE_NAME="$(terraform output -raw schedule_rule_name 2>/dev/null || echo '')"
-
-          echo "function_name=$FUNCTION_NAME" >> "$GITHUB_OUTPUT"
-          echo "function_arn=$FUNCTION_ARN" >> "$GITHUB_OUTPUT"
-          echo "schedule_rule_name=$SCHEDULE_RULE_NAME" >> "$GITHUB_OUTPUT"
-
+          {
+            echo "function_name=$(terraform output -raw function_name)"
+            echo "function_arn=$(terraform output -raw function_arn)"
+            echo "schedule_rule_name=$(terraform output -raw schedule_rule_name)"
+          } >> "$GITHUB_OUTPUT"
           echo "✅ Outputs set successfully"
 
       - name: Debug Lambda (on failure)
