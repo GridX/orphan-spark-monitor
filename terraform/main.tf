@@ -4,6 +4,12 @@ terraform {
     aws     = { source = "hashicorp/aws", version = ">= 5.0" }
     archive = { source = "hashicorp/archive", version = ">= 2.4" }
   }
+
+  # Backend is intentionally empty here — bucket/key/region/dynamodb_table all
+  # come from `-backend-config=environments/<env>.backend.hcl` at init time.
+  # Without this block Terraform silently falls back to a local backend, state
+  # disappears at end of each CI run, and every apply collides with itself.
+  backend "s3" {}
 }
 
 # The Slack webhook lives in Secrets Manager (slack/long_running_job by default).
